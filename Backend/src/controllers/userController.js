@@ -1,6 +1,8 @@
 import User from "../models/userModel.js";
 import asyncHandler from "express-async-handler";
 import generateToken from "../utils/generateToken.js";
+import { sendPasswordResetLink } from "../utils/resetPassword.js";
+import jwt from "jsonwebtoken";
 
 const createUser = async (req, res, next) => {
   const { name, email, password } = req.body;
@@ -105,7 +107,8 @@ const getProfile = asyncHandler(async (req, res) => {
 const updateProfile = asyncHandler(async (req, res) => {
   const { password } = req.body;
 
-  if (password.length < 8) {
+  // check for password if present
+  if (password && password.length < 8) {
     res.status(400);
     throw new Error("Password must be at least 8 characters");
   }
@@ -128,4 +131,103 @@ const updateProfile = asyncHandler(async (req, res) => {
   }
 });
 
-export { createUser, login, logout, getProfile, updateProfile };
+const forgetPassword = asyncHandler(async (req, res, next) => {
+  const { email } = req.body;
+
+  if (!email) {
+    const err = new Error("Email is required");
+    res.status(400);
+    return next(err);
+  }
+
+  // check user
+  const user = await User.findOne({ email });
+
+  if (!user) {
+    const err = new Error("Invalid email address");
+    res.status(404);
+    return next(err);
+  }
+
+  // user found - generate token
+  const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET_KEY, {
+    expiresIn: 300,
+  });
+
+  const date = new Date();
+  const newMinutes = date.getMinutes() + 5;
+  date.setMinutes(newMinutes);
+
+  user.reset_password_token = token;
+  user.reset_password_expiration = date;
+  await user.save();
+
+  // send mail
+  const verificationEmailResponse = await sendPasswordResetLink(
+    email,
+    token,
+    user.name,
+  );
+
+  if (verificationEmailResponse.error) {
+    const err = new Error(
+      "Failed to send password reset link, please try later",
+    );
+    res.statusCode = 500;
+    return next(err);
+  }
+
+  res
+    .status(200)
+    .json({ message: "Password reset link sent, please check your email" });
+});
+
+const resetPassword = asyncHandler(async (req, res, next) => {
+  const { token } = req.params;
+  const { password } = req.body;
+
+  if (!token) {
+    const err = new Error("Invalid token");
+    res.statusCode = 500;
+    return next(err);
+  }
+
+  if (!password) {
+    const err = new Error("Bad request, password is missing");
+    res.statusCode = 400;
+    return next(err);
+  }
+
+  const user = await User.findOne({
+    reset_password_token: token,
+    reset_password_expiration: { $gt: Date.now() },
+  });
+
+  // user not found
+  if (!user) {
+    const err = new Error(
+      "Password reset link is invalid or expired, please try again",
+    );
+    res.statusCode = 404;
+    return next(err);
+  }
+
+  // user found
+  user.password = password;
+  user.reset_password_token = undefined;
+  user.reset_password_expiration = undefined;
+  await user.save();
+  res.status(200).json({
+    message: "Password updated successfully. Please login to continue",
+  });
+});
+
+export {
+  createUser,
+  login,
+  logout,
+  getProfile,
+  updateProfile,
+  forgetPassword,
+  resetPassword,
+};
